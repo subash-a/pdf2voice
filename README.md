@@ -48,6 +48,7 @@ python pdf_to_speech.py <input.pdf> [options]
 | `--skip-tables` | off | Drop table placeholders from the text |
 | `--skip-figures` | off | Drop figure placeholders from the text |
 | `--txt-only` | off | Extract and clean text only, skip TTS |
+| `--multi-column` | off | Use layout-aware extraction for multi-column PDFs (e.g. academic papers) |
 
 ### Examples
 
@@ -63,6 +64,9 @@ python pdf_to_speech.py paper.pdf --txt-only
 
 # Save to a specific path
 python pdf_to_speech.py paper.pdf --output ~/audiobooks/paper.mp3
+
+# Multi-column layout (e.g. two-column academic paper)
+python pdf_to_speech.py paper.pdf --multi-column
 ```
 
 Output files are written to the `output/` directory by default (both the cleaned `.txt` and the `.mp3`).
