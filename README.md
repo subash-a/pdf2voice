@@ -5,7 +5,10 @@ Convert a PDF document to an MP3 audio file using [Kokoro TTS](https://github.co
 ## How it works
 
 1. Extracts text from the PDF (via `pdfplumber` or `pypdf`)
-2. Cleans the text — strips headers/footers, page numbers, bare URLs, fixes hyphenated line-breaks, normalises abbreviations and punctuation
+   - Scans all pages to detect header/footer zones: text that appears at consistent y-positions in the top/bottom 15% of multiple pages is flagged as a header or footer
+   - Each page is spatially cropped to exclude those zones before text is extracted, so headers and footers never enter the pipeline
+   - With `--multi-column`, reading order is reconstructed by grouping words into columns based on the largest horizontal gap in word positions
+2. Cleans the text — strips standalone page numbers, bare URLs, fixes hyphenated line-breaks, normalises abbreviations and punctuation
 3. Splits the cleaned text into ~500-word chunks at paragraph boundaries
 4. Sends each chunk to a locally running Kokoro TTS server and streams the audio into a single MP3
 
