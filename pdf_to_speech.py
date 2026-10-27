@@ -41,12 +41,118 @@ NORMALISE = [
 # Extraction
 # ---------------------------------------------------------------------------
 
+def _words_to_text(words: list[dict], page_width: float, multi_column: bool) -> str:
+    """Reconstruct reading-order text from a list of pdfplumber word dicts."""
+    if not words:
+        return ""
+
+    # Detect column separator: find the largest horizontal gap in word midpoints
+    # within the central 20-80% of the page width.
+    col_split: float | None = None
+    if multi_column:
+        midpoints = sorted((w["x0"] + w["x1"]) / 2 for w in words)
+        lo, hi = page_width * 0.20, page_width * 0.80
+        central = [x for x in midpoints if lo <= x <= hi]
+        if len(central) >= 4:
+            gaps = [(central[i + 1] - central[i], (central[i] + central[i + 1]) / 2)
+                    for i in range(len(central) - 1)]
+            largest_gap, split_x = max(gaps)
+            # Only treat as multi-column if the gap is meaningfully wide (>5% of page)
+            if largest_gap > page_width * 0.05:
+                col_split = split_x
+
+    def word_column(w: dict) -> int:
+        if col_split is None:
+            return 0
+        return 0 if (w["x0"] + w["x1"]) / 2 < col_split else 1
+
+    # Group words into lines within each column (words within 3pt vertically = same line)
+    from collections import defaultdict
+    columns: dict[int, list[dict]] = defaultdict(list)
+    for w in words:
+        columns[word_column(w)].append(w)
+
+    all_lines: list[tuple[float, int, str]] = []  # (top, col_index, line_text)
+    for col_idx in sorted(columns):
+        col_words = sorted(columns[col_idx], key=lambda w: (w["top"], w["x0"]))
+        if not col_words:
+            continue
+        line_words: list[dict] = [col_words[0]]
+        for w in col_words[1:]:
+            if abs(w["top"] - line_words[-1]["top"]) <= 3:
+                line_words.append(w)
+            else:
+                line_text = " ".join(lw["text"] for lw in sorted(line_words, key=lambda lw: lw["x0"]))
+                all_lines.append((line_words[0]["top"], col_idx, line_text))
+                line_words = [w]
+        line_text = " ".join(lw["text"] for lw in sorted(line_words, key=lambda lw: lw["x0"]))
+        all_lines.append((line_words[0]["top"], col_idx, line_text))
+
+    # Sort: single-column → by top only; multi-column → left col first, then right col
+    if col_split is None:
+        all_lines.sort(key=lambda t: t[0])
+    else:
+        all_lines.sort(key=lambda t: (t[1], t[0]))
+
+    return "\n".join(line for _, _, line in all_lines)
+
+
+def _detect_header_footer_zones(pdf) -> tuple[float | None, float | None]:
+    """Return (header_bottom, footer_top) in points by finding text that repeats
+    at consistent y-positions across pages.  None means no zone detected."""
+    from collections import defaultdict
+
+    # Map each word text → list of (page_index, top, bottom, relative_top)
+    top_zone: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
+    bot_zone: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
+
+    n_pages = len(pdf.pages)
+    threshold = max(2, n_pages // 3)
+
+    for page_idx, page in enumerate(pdf.pages):
+        h = page.height
+        for w in (page.extract_words() or []):
+            rel = w["top"] / h
+            if rel < 0.15:
+                top_zone[w["text"]].append((page_idx, w["top"], w["bottom"]))
+            elif rel > 0.85:
+                bot_zone[w["text"]].append((page_idx, w["top"], w["bottom"]))
+
+    header_bottom: float | None = None
+    for text, occurrences in top_zone.items():
+        if len({p for p, _, _ in occurrences}) >= threshold:
+            bottom = max(b for _, _, b in occurrences)
+            header_bottom = max(header_bottom or 0.0, bottom)
+
+    footer_top: float | None = None
+    for text, occurrences in bot_zone.items():
+        if len({p for p, _, _ in occurrences}) >= threshold:
+            top = min(t for _, t, _ in occurrences)
+            footer_top = min(footer_top or float("inf"), top)
+
+    return header_bottom, footer_top
+
+
 def extract_text(pdf_path: Path, multi_column: bool = False) -> tuple[list[str], int]:
     """Return (pages_text, page_count). Uses pdfplumber, falls back to pypdf."""
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
-            pages = [p.extract_text(layout=multi_column) or "" for p in pdf.pages]
+            header_bottom, footer_top = _detect_header_footer_zones(pdf)
+            pages = []
+            for p in pdf.pages:
+                # Crop out header/footer zones before extraction
+                y0 = (header_bottom + 2) if header_bottom is not None else 0
+                y1 = (footer_top - 2) if footer_top is not None else p.height
+                # Guard: never crop more than 20% from either end
+                y0 = min(y0, p.height * 0.20)
+                y1 = max(y1, p.height * 0.80)
+                cropped = p.crop((0, y0, p.width, y1))
+                if multi_column:
+                    words = cropped.extract_words() or []
+                    pages.append(_words_to_text(words, p.width, multi_column=True))
+                else:
+                    pages.append(cropped.extract_text() or "")
         return pages, len(pages)
     except ImportError:
         pass
@@ -66,44 +172,20 @@ def extract_text(pdf_path: Path, multi_column: bool = False) -> tuple[list[str],
 # Cleaning
 # ---------------------------------------------------------------------------
 
-def detect_repeated_lines(pages: list[str], threshold: int = 3) -> set[str]:
-    """Find short lines that appear on many pages — likely headers/footers."""
-    from collections import Counter
-    line_counts: Counter = Counter()
-    for page_text in pages:
-        seen_on_page = set()
-        for line in page_text.splitlines():
-            stripped = line.strip()
-            if stripped and len(stripped) < 80:
-                if stripped not in seen_on_page:
-                    line_counts[stripped] += 1
-                    seen_on_page.add(stripped)
-    return {line for line, count in line_counts.items() if count >= threshold}
-
-
-def clean_page(text: str, repeated: set[str]) -> str:
-    lines = text.splitlines()
-    cleaned = []
-    for line in lines:
-        stripped = line.strip()
-        # Drop page numbers (standalone digit strings)
-        if re.fullmatch(r"\d+", stripped):
-            continue
-        # Drop repeated headers/footers
-        if stripped in repeated:
-            continue
-        # Drop bare URLs / DOIs
-        if re.match(r"https?://\S+$", stripped) or re.match(r"doi:\S+$", stripped, re.I):
-            continue
-        cleaned.append(line)
-    return "\n".join(cleaned)
-
-
 def clean_text(pages: list[str], skip_tables: bool, skip_figures: bool) -> str:
-    repeated = detect_repeated_lines(pages)
     parts = []
     for page_text in pages:
-        text = clean_page(page_text, repeated)
+        lines = []
+        for line in page_text.splitlines():
+            stripped = line.strip()
+            # Drop standalone page numbers
+            if re.fullmatch(r"\d+", stripped):
+                continue
+            # Drop bare URLs / DOIs
+            if re.match(r"https?://\S+$", stripped) or re.match(r"doi:\S+$", stripped, re.I):
+                continue
+            lines.append(line)
+        text = "\n".join(lines)
         # Rejoin hyphenated line-breaks
         text = re.sub(r"-\n(\w)", r"\1", text)
         parts.append(text)
