@@ -41,12 +41,12 @@ NORMALISE = [
 # Extraction
 # ---------------------------------------------------------------------------
 
-def extract_text(pdf_path: Path) -> tuple[list[str], int]:
+def extract_text(pdf_path: Path, multi_column: bool = False) -> tuple[list[str], int]:
     """Return (pages_text, page_count). Uses pdfplumber, falls back to pypdf."""
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
-            pages = [p.extract_text() or "" for p in pdf.pages]
+            pages = [p.extract_text(layout=multi_column) or "" for p in pdf.pages]
         return pages, len(pages)
     except ImportError:
         pass
@@ -224,6 +224,7 @@ def main() -> None:
     parser.add_argument("--host", default="http://localhost:8880", help="Kokoro API base URL")
     parser.add_argument("--skip-tables", action="store_true", help="Remove table placeholders from output")
     parser.add_argument("--skip-figures", action="store_true", help="Remove figure placeholders from output")
+    parser.add_argument("--multi-column", action="store_true", help="Use layout-aware extraction to handle multi-column PDFs")
     parser.add_argument("--txt-only", action="store_true", help="Extract and clean text only, skip TTS")
     args = parser.parse_args()
 
@@ -242,7 +243,7 @@ def main() -> None:
 
     # --- Extract ---
     print(f"Extracting text from {pdf_path.name}...")
-    pages, page_count = extract_text(pdf_path)
+    pages, page_count = extract_text(pdf_path, multi_column=args.multi_column)
     print(f"  {page_count} pages found.")
 
     if all(p.strip() == "" for p in pages):
